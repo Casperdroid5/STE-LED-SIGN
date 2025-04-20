@@ -43,6 +43,10 @@ The sign has four built-in animation modes:
 
 For advanced customization, you can control the sign via Bluetooth from your smartphone or computer.
 
+APPS to send Bluetooth commands:
+For Android in Google Play: Serial Bluetooth Terminal (tested, works)
+For IOS in Appstore: Bluetooth Terminal (not tested)
+
 ### Entering Bluetooth Mode
 
 1. Hold the button for 3 seconds until the button LED lights up
@@ -51,6 +55,7 @@ For advanced customization, you can control the sign via Bluetooth from your sma
 4. The circle will stay solid blue once connected
 
 ### Bluetooth Commands
+
 
 Send the following text commands via Bluetooth to customize your sign:
 
