@@ -1,288 +1,758 @@
 #include <FastLED.h>
+#include <EEPROM.h>
+#include <BluetoothSerial.h>
 
-// Pin Definitions
-#define LED_STRIP1_PIN    5     // Data pin for first LED strip (45 LEDs)
-#define LED_STRIP2_PIN    13    // Data pin for second LED strip (52 WS2812B LEDs)
-#define BUTTON_PIN        18    // Pin for button input
-#define BUTTON_LED_PIN    4     // Pin for button's built-in LED
+// Check if Bluetooth is available
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+  #error Bluetooth is not enabled! Please run `make menuconfig` in ESP-IDF to enable it
+#endif
 
-// LED Configuration
-#define NUM_LEDS1         45    // Total number of LEDs in first strip
-#define LEDS_PER_CHIP     3     // Number of LEDs per addressable chip (for strip 1)
-#define NUM_CHIPS         (NUM_LEDS1 / LEDS_PER_CHIP)
-#define NUM_LEDS2         52    // Total number of LEDs in second strip (WS2812B)
+// LED strip definitions
+#define LED_PIN_LETTERS   13
+#define LED_PIN_CIRCLE    5
+#define BUTTON_PIN        18
+#define BUTTON_LED_PIN    4
 
-// Button debounce configuration
-#define DEBOUNCE_DELAY    50    // Debounce time in milliseconds
+// LED counts
+#define NUM_LEDS_S        21
+#define NUM_LEDS_T        11
+#define NUM_LEDS_E        18
+#define NUM_LEDS_LETTERS  (NUM_LEDS_S + NUM_LEDS_T + NUM_LEDS_E)
+#define NUM_LEDS_CIRCLE   48
 
-// Define the arrays of LEDs for both strips
-CRGB leds1[NUM_LEDS1];
-CRGB leds2[NUM_LEDS2];
+// LED arrays
+CRGB lettersLeds[NUM_LEDS_LETTERS];
+CRGB circleLeds[NUM_LEDS_CIRCLE];
 
-// Button state variables
-int buttonState = HIGH;             // Current button state (HIGH = not pressed with pull-up)
-int lastButtonState = HIGH;         // Previous button state
-unsigned long lastDebounceTime = 0; // Last time the button state changed
+// Letter segments for easier access
+#define S_START 0
+#define S_END   (NUM_LEDS_S - 1)
+#define T_START NUM_LEDS_S
+#define T_END   (NUM_LEDS_S + NUM_LEDS_T - 1)
+#define E_START (NUM_LEDS_S + NUM_LEDS_T)
+#define E_END   (NUM_LEDS_LETTERS - 1)
+
+// Button handling
+int buttonState = HIGH;
+int lastButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
+unsigned long debounceDelay = 50;
+unsigned long buttonPressStartTime = 0;
+boolean buttonLongPressed = false;
+boolean buttonVeryLongPressed = false;
 
 // Mode control
+#define NUM_MODES 4  // Regular modes (not including Bluetooth)
 int currentMode = 0;
-const int NUM_MODES = 5;  // Total number of available modes
+boolean bluetoothMode = false;
+
+// Animation timing
+unsigned long lastUpdateTime = 0;
+unsigned long updateInterval = 50;  // 50ms for smooth animations
+
+// EEPROM configuration
+#define EEPROM_SIZE 32
+#define MODE_ADDRESS 0
+#define LETTER_COLOR_R_ADDRESS 1
+#define LETTER_COLOR_G_ADDRESS 2
+#define LETTER_COLOR_B_ADDRESS 3
+#define CIRCLE_COLOR_R_ADDRESS 4
+#define CIRCLE_COLOR_G_ADDRESS 5
+#define CIRCLE_COLOR_B_ADDRESS 6
+#define BRIGHTNESS_ADDRESS 7
+#define LETTER_ENABLED_ADDRESS 8
+#define CIRCLE_ENABLED_ADDRESS 9
+#define CIRCLE_EFFECT_ADDRESS 10
+
+unsigned long lastEepromWrite = 0;
+#define WRITE_INTERVAL 60000  // Save every 1 minute after change (changed from 5s to 60s)
+bool eepromNeedsSaving = false;
+
+// LED color and state
+CRGB letterColor = CRGB::Yellow;  // Default letter color
+CRGB circleColor = CRGB::Yellow;  // Default circle color
+uint8_t brightness = 125;         // Default brightness (max 125 as requested)
+bool lettersEnabled = true;       // Letters enabled by default
+bool circleEnabled = true;        // Circle enabled by default
+uint8_t circleEffect = 0;         // 0=solid, 1=rainbow, 2=hue shift
+
+// Animation variables
+uint8_t hue = 0;
+uint8_t chasePosition = 0;
+
+// Sequential letter variables
+int sequenceStep = 0;
+unsigned long lastSequenceChange = 0;
+unsigned long sequenceInterval = 800;
+
+// Button press durations
+const unsigned long BT_LONG_PRESS_DURATION = 3000;      // 3 seconds for BT mode
+const unsigned long RESET_LONG_PRESS_DURATION = 10000;  // 10 seconds for reset
+
+// Bluetooth
+BluetoothSerial SerialBT;
+unsigned long bluetoothStartTime = 0;
+const unsigned long BLUETOOTH_TIMEOUT = 120000;  // 2 minutes timeout if no connection
+bool bluetoothConnected = false;
+unsigned long lastBluetoothActivity = 0;
+char btBuffer[64];
+int btBufferIndex = 0;
 
 void setup() {
-  // Initialize serial for debugging
   Serial.begin(115200);
-  Serial.println("ESP32 Dual LED Strip Controller with Button Mode Selection");
   
-  // Set pin modes
-  pinMode(BUTTON_PIN, INPUT_PULLUP);  // Button with internal pull-up resistor
-  pinMode(BUTTON_LED_PIN, OUTPUT);    // Button LED as output
-  digitalWrite(BUTTON_LED_PIN, LOW);  // Initially off
+  // Initialize EEPROM
+  EEPROM.begin(EEPROM_SIZE);
   
-  // Initialize FastLED for both strips
-  FastLED.addLeds<WS2812B, LED_STRIP1_PIN, GRB>(leds1, NUM_LEDS1).setCorrection(TypicalLEDStrip);
-  FastLED.addLeds<WS2812B, LED_STRIP2_PIN, GRB>(leds2, NUM_LEDS2).setCorrection(TypicalLEDStrip);
+  // Initialize LED strips with correct color ordering
+  FastLED.addLeds<WS2812B, LED_PIN_LETTERS, GRB>(lettersLeds, NUM_LEDS_LETTERS);
+  FastLED.addLeds<WS2812B, LED_PIN_CIRCLE, BGR>(circleLeds, NUM_LEDS_CIRCLE);  // BGR for circle
   
-  // Set global brightness
-  FastLED.setBrightness(64);  // 0-255
+  // Initialize the button pin as input with pullup
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
   
-  // Initially turn all LEDs off
-  FastLED.clear();
+  // Initialize button LED pin as output
+  pinMode(BUTTON_LED_PIN, OUTPUT);
+  digitalWrite(BUTTON_LED_PIN, LOW);
+  
+  // Load saved settings from EEPROM
+  loadSettingsFromEEPROM();
+  
+  // Set initial brightness
+  FastLED.setBrightness(brightness);
+  
+  // Start with all LEDs off
+  clearAllLeds();
   FastLED.show();
+  
+  // Initialize Bluetooth (but don't start it yet)
+  SerialBT.begin("STE_LED_Control");
+  SerialBT.end(); // Turn off BT by default
+  
+  Serial.println("Enhanced LED controller initialized");
+}
+
+void loadSettingsFromEEPROM() {
+  // Load mode
+  currentMode = EEPROM.read(MODE_ADDRESS);
+  if (currentMode >= NUM_MODES) {
+    currentMode = 0; // Default to mode 0 if stored value is invalid
+  }
+  
+  // Load colors
+  letterColor.r = EEPROM.read(LETTER_COLOR_R_ADDRESS);
+  letterColor.g = EEPROM.read(LETTER_COLOR_G_ADDRESS);
+  letterColor.b = EEPROM.read(LETTER_COLOR_B_ADDRESS);
+  
+  circleColor.r = EEPROM.read(CIRCLE_COLOR_R_ADDRESS);
+  circleColor.g = EEPROM.read(CIRCLE_COLOR_G_ADDRESS);
+  circleColor.b = EEPROM.read(CIRCLE_COLOR_B_ADDRESS);
+  
+  // If colors are all zeros (likely first boot), set defaults
+  if (letterColor.r == 0 && letterColor.g == 0 && letterColor.b == 0) {
+    letterColor = CRGB::Yellow;
+  }
+  if (circleColor.r == 0 && circleColor.g == 0 && circleColor.b == 0) {
+    circleColor = CRGB::Yellow;
+  }
+  
+  // Load brightness
+  brightness = EEPROM.read(BRIGHTNESS_ADDRESS);
+  if (brightness == 0 || brightness > 125) {
+    brightness = 125; // Default/max brightness
+  }
+  
+  // Load enabled states
+  lettersEnabled = EEPROM.read(LETTER_ENABLED_ADDRESS) > 0;
+  circleEnabled = EEPROM.read(CIRCLE_ENABLED_ADDRESS) > 0;
+  
+  // Load circle effect
+  circleEffect = EEPROM.read(CIRCLE_EFFECT_ADDRESS);
+  if (circleEffect > 2) { // 0=solid, 1=rainbow, 2=hue shift
+    circleEffect = 0;
+  }
+  
+  Serial.println("Settings loaded from EEPROM");
 }
 
 void loop() {
-  // Check if the button is pressed (with debounce)
+  // Check for button press
   checkButton();
   
-  // Run the current display mode
-  runCurrentMode();
+  // Update animations based on mode
+  if (!bluetoothMode) {
+    unsigned long currentTime = millis();
+    if (currentTime - lastUpdateTime >= updateInterval) {
+      lastUpdateTime = currentTime;
+      
+      // Run the appropriate animation based on current mode
+      switch (currentMode) {
+        case 0:
+          // Mode 0: All yellow (or custom colors if set)
+          solidColorMode();
+          break;
+        case 1:
+          // Mode 1: Snake/chase effect
+          letterChaseMode();
+          break;
+        case 2:
+          // Mode 2: Sequential letters
+          sequentialLettersMode();
+          break;
+        case 3:
+          // Mode 3: Pulsing letters
+          letterPulseMode();
+          break;
+      }
+      
+      // Update hue for rainbow effects
+      hue++;
+      
+      // Update LEDs
+      FastLED.show();
+    }
+    
+    // Check if we need to save settings to EEPROM
+    if (eepromNeedsSaving && (millis() - lastEepromWrite > WRITE_INTERVAL)) {
+      saveSettingsToEEPROM();
+      eepromNeedsSaving = false;
+      lastEepromWrite = millis();
+    }
+  } else {
+    // Handle Bluetooth mode
+    handleBluetoothMode();
+  }
+}
+
+void saveSettingsToEEPROM() {
+  // Save mode
+  EEPROM.write(MODE_ADDRESS, currentMode);
+  
+  // Save colors
+  EEPROM.write(LETTER_COLOR_R_ADDRESS, letterColor.r);
+  EEPROM.write(LETTER_COLOR_G_ADDRESS, letterColor.g);
+  EEPROM.write(LETTER_COLOR_B_ADDRESS, letterColor.b);
+  
+  EEPROM.write(CIRCLE_COLOR_R_ADDRESS, circleColor.r);
+  EEPROM.write(CIRCLE_COLOR_G_ADDRESS, circleColor.g);
+  EEPROM.write(CIRCLE_COLOR_B_ADDRESS, circleColor.b);
+  
+  // Save brightness
+  EEPROM.write(BRIGHTNESS_ADDRESS, brightness);
+  
+  // Save enabled states
+  EEPROM.write(LETTER_ENABLED_ADDRESS, lettersEnabled ? 1 : 0);
+  EEPROM.write(CIRCLE_ENABLED_ADDRESS, circleEnabled ? 1 : 0);
+  
+  // Save circle effect
+  EEPROM.write(CIRCLE_EFFECT_ADDRESS, circleEffect);
+  
+  // Commit the writes
+  EEPROM.commit();
+  
+  Serial.println("Settings saved to EEPROM");
+}
+
+// Updated animation modes to use custom colors
+// Mode 0: Solid color
+void solidColorMode() {
+  if (lettersEnabled) {
+    fill_solid(lettersLeds, NUM_LEDS_LETTERS, letterColor);
+  } else {
+    fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Black);
+  }
+  
+  if (circleEnabled) {
+    // Apply the circle effect
+    switch (circleEffect) {
+      case 0: // Solid color
+        fill_solid(circleLeds, NUM_LEDS_CIRCLE, circleColor);
+        break;
+      case 1: // Rainbow effect
+        fill_rainbow(circleLeds, NUM_LEDS_CIRCLE, hue, 255 / NUM_LEDS_CIRCLE);
+        break;
+      case 2: // Slow hue shift
+        fill_solid(circleLeds, NUM_LEDS_CIRCLE, CHSV(hue, 255, 255));
+        break;
+    }
+  } else {
+    fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Black);
+  }
+}
+
+// Mode 1: Letter chase (snake effect)
+void letterChaseMode() {
+  if (lettersEnabled) {
+    // Fade all LEDs slightly
+    fadeToBlackBy(lettersLeds, NUM_LEDS_LETTERS, 40);
+    
+    // Chase through letter LEDs
+    int letterPos = chasePosition % NUM_LEDS_LETTERS;
+    lettersLeds[letterPos] = letterColor;
+    
+    // Update position for next frame
+    chasePosition = (chasePosition + 1) % NUM_LEDS_LETTERS;
+  } else {
+    fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Black);
+  }
+  
+  if (circleEnabled) {
+    // Apply the circle effect
+    switch (circleEffect) {
+      case 0: // Solid color
+        fill_solid(circleLeds, NUM_LEDS_CIRCLE, circleColor);
+        break;
+      case 1: // Rainbow effect
+        fill_rainbow(circleLeds, NUM_LEDS_CIRCLE, hue, 255 / NUM_LEDS_CIRCLE);
+        break;
+      case 2: // Slow hue shift
+        fill_solid(circleLeds, NUM_LEDS_CIRCLE, CHSV(hue, 255, 255));
+        break;
+    }
+  } else {
+    fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Black);
+  }
+}
+
+// Mode 2: Sequential letters
+void sequentialLettersMode() {
+  // Check if it's time to change sequence step
+  unsigned long currentTime = millis();
+  if (currentTime - lastSequenceChange >= sequenceInterval) {
+    lastSequenceChange = currentTime;
+    
+    // Move to next step in sequence
+    sequenceStep = (sequenceStep + 1) % 6;
+  }
+  
+  if (lettersEnabled) {
+    // Clear all letters first
+    fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Black);
+    
+    // Set appropriate letter based on sequence step
+    switch (sequenceStep) {
+      case 0: // S on
+        fill_solid(&lettersLeds[S_START], NUM_LEDS_S, letterColor);
+        break;
+      case 1: // All off
+        // Already cleared above
+        break;
+      case 2: // T on
+        fill_solid(&lettersLeds[T_START], NUM_LEDS_T, letterColor);
+        break;
+      case 3: // All off
+        // Already cleared above
+        break;
+      case 4: // E on
+        fill_solid(&lettersLeds[E_START], NUM_LEDS_E, letterColor);
+        break;
+      case 5: // All off
+        // Already cleared above
+        break;
+    }
+  } else {
+    fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Black);
+  }
+  
+  if (circleEnabled) {
+    // Apply the circle effect
+    switch (circleEffect) {
+      case 0: // Solid color
+        fill_solid(circleLeds, NUM_LEDS_CIRCLE, circleColor);
+        break;
+      case 1: // Rainbow effect
+        fill_rainbow(circleLeds, NUM_LEDS_CIRCLE, hue, 255 / NUM_LEDS_CIRCLE);
+        break;
+      case 2: // Slow hue shift
+        fill_solid(circleLeds, NUM_LEDS_CIRCLE, CHSV(hue, 255, 255));
+        break;
+    }
+  } else {
+    fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Black);
+  }
+}
+
+// Mode 3: Letter pulse effect
+void letterPulseMode() {
+  // Calculate sine wave for brightness
+  uint8_t pulseBrightness = beatsin8(15, 20, 255);
+  
+  if (lettersEnabled) {
+    // Apply brightness to letters
+    uint8_t r = scale8(letterColor.r, pulseBrightness);
+    uint8_t g = scale8(letterColor.g, pulseBrightness);
+    uint8_t b = scale8(letterColor.b, pulseBrightness);
+    
+    fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB(r, g, b));
+  } else {
+    fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Black);
+  }
+  
+  if (circleEnabled) {
+    // Apply the circle effect
+    switch (circleEffect) {
+      case 0: // Solid color
+        fill_solid(circleLeds, NUM_LEDS_CIRCLE, circleColor);
+        break;
+      case 1: // Rainbow effect
+        fill_rainbow(circleLeds, NUM_LEDS_CIRCLE, hue, 255 / NUM_LEDS_CIRCLE);
+        break;
+      case 2: // Slow hue shift
+        fill_solid(circleLeds, NUM_LEDS_CIRCLE, CHSV(hue, 255, 255));
+        break;
+    }
+  } else {
+    fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Black);
+  }
+}
+
+void handleBluetoothMode() {
+  // Check for Bluetooth timeout if not connected
+  if (!bluetoothConnected) {
+    if (millis() - bluetoothStartTime > BLUETOOTH_TIMEOUT) {
+      Serial.println("Bluetooth timeout - no connection");
+      exitBluetoothMode();
+      return;
+    }
+    
+    // Blink blue on the circle while waiting for connection
+    if ((millis() / 500) % 2 == 0) {
+      fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Blue);
+    } else {
+      fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Black);
+    }
+    
+    // Keep letters on with current letter color
+    if (lettersEnabled) {
+      fill_solid(lettersLeds, NUM_LEDS_LETTERS, letterColor);
+    } else {
+      fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Black);
+    }
+  } else {
+    // Connected - solid blue ring
+    fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Blue);
+    
+    // Keep letters with current color
+    if (lettersEnabled) {
+      fill_solid(lettersLeds, NUM_LEDS_LETTERS, letterColor);
+    } else {
+      fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Black);
+    }
+  }
+  
+  // Keep button LED on in Bluetooth mode
+  digitalWrite(BUTTON_LED_PIN, HIGH);
+  
+  // Process any Bluetooth commands
+  processBluetooth();
+  
+  // Update LEDs
+  FastLED.show();
+  
+  // Check if we need to save settings to EEPROM
+  if (eepromNeedsSaving && (millis() - lastEepromWrite > WRITE_INTERVAL)) {
+    saveSettingsToEEPROM();
+    eepromNeedsSaving = false;
+    lastEepromWrite = millis();
+  }
+}
+
+void processBluetooth() {
+  // Check if data is available
+  while (SerialBT.available()) {
+    char c = SerialBT.read();
+    
+    // Mark as connected and reset activity timer
+    bluetoothConnected = true;
+    lastBluetoothActivity = millis();
+    
+    // Process incoming character
+    if (c == '\n' || c == '\r') {
+      if (btBufferIndex > 0) {
+        btBuffer[btBufferIndex] = '\0';  // Null-terminate
+        processBtCommand(btBuffer);
+        btBufferIndex = 0;  // Reset buffer
+      }
+    } else if (btBufferIndex < sizeof(btBuffer) - 1) {
+      btBuffer[btBufferIndex++] = c;
+    }
+  }
+  
+  // Check for inactivity timeout (2 minutes)
+  if (bluetoothConnected && (millis() - lastBluetoothActivity > BLUETOOTH_TIMEOUT)) {
+    Serial.println("Bluetooth timeout - inactivity");
+    bluetoothConnected = false;
+    // Don't exit BT mode, just mark as disconnected
+  }
+}
+
+void processBtCommand(char* command) {
+  Serial.print("BT Command: ");
+  Serial.println(command);
+  
+  // Command format:
+  // L,R,G,B    - Set letter color (0-255 for each)
+  // C,R,G,B    - Set circle color (0-255 for each)
+  // B,VAL      - Set brightness (0-125)
+  // LE,1/0     - Enable/disable letters
+  // CE,1/0     - Enable/disable circle
+  // CF,0/1/2   - Set circle effect (0=solid, 1=rainbow, 2=hue)
+  // S          - Save settings
+  // X          - Exit BT mode
+  // ?          - Help
+  
+  // Process command based on first character
+  if (command[0] == 'L' && command[1] == ',') {
+    // Letter color command
+    int r = 0, g = 0, b = 0;
+    sscanf(command + 2, "%d,%d,%d", &r, &g, &b);
+    r = constrain(r, 0, 255);
+    g = constrain(g, 0, 255);
+    b = constrain(b, 0, 255);
+    
+    letterColor = CRGB(r, g, b);
+    eepromNeedsSaving = true;
+    
+    SerialBT.printf("Letter color set to R:%d G:%d B:%d\n", r, g, b);
+  }
+  else if (command[0] == 'C' && command[1] == ',') {
+    // Circle color command
+    int r = 0, g = 0, b = 0;
+    sscanf(command + 2, "%d,%d,%d", &r, &g, &b);
+    r = constrain(r, 0, 255);
+    g = constrain(g, 0, 255);
+    b = constrain(b, 0, 255);
+    
+    circleColor = CRGB(r, g, b);
+    eepromNeedsSaving = true;
+    
+    SerialBT.printf("Circle color set to R:%d G:%d B:%d\n", r, g, b);
+  }
+  else if (command[0] == 'B' && command[1] == ',') {
+    // Brightness command
+    int b = atoi(command + 2);
+    b = constrain(b, 0, 125);  // Max 125 as requested
+    
+    brightness = b;
+    FastLED.setBrightness(brightness);
+    eepromNeedsSaving = true;
+    
+    SerialBT.printf("Brightness set to %d\n", b);
+  }
+  else if (command[0] == 'L' && command[1] == 'E' && command[2] == ',') {
+    // Letter enable/disable
+    int enable = atoi(command + 3);
+    lettersEnabled = (enable != 0);
+    eepromNeedsSaving = true;
+    
+    SerialBT.printf("Letters %s\n", lettersEnabled ? "enabled" : "disabled");
+  }
+  else if (command[0] == 'C' && command[1] == 'E' && command[2] == ',') {
+    // Circle enable/disable
+    int enable = atoi(command + 3);
+    circleEnabled = (enable != 0);
+    eepromNeedsSaving = true;
+    
+    SerialBT.printf("Circle %s\n", circleEnabled ? "enabled" : "disabled");
+  }
+  else if (command[0] == 'C' && command[1] == 'F' && command[2] == ',') {
+    // Circle effect
+    int effect = atoi(command + 3);
+    effect = constrain(effect, 0, 2);
+    circleEffect = effect;
+    eepromNeedsSaving = true;
+    
+    const char* effectNames[] = {"Solid", "Rainbow", "Hue Shift"};
+    SerialBT.printf("Circle effect set to: %s\n", effectNames[effect]);
+  }
+  else if (command[0] == 'S') {
+    // Save settings
+    saveSettingsToEEPROM();
+    eepromNeedsSaving = false;
+    
+    SerialBT.println("Settings saved to EEPROM");
+  }
+  else if (command[0] == 'X') {
+    // Exit BT mode
+    SerialBT.println("Exiting Bluetooth mode");
+    exitBluetoothMode();
+  }
+  else if (command[0] == '?') {
+    // Help
+    SerialBT.println("Commands:");
+    SerialBT.println("L,R,G,B    - Set letter color (0-255 for each)");
+    SerialBT.println("C,R,G,B    - Set circle color (0-255 for each)");
+    SerialBT.println("B,VAL      - Set brightness (0-125)");
+    SerialBT.println("LE,1/0     - Enable/disable letters");
+    SerialBT.println("CE,1/0     - Enable/disable circle");
+    SerialBT.println("CF,0/1/2   - Circle effect (0=solid, 1=rainbow, 2=hue)");
+    SerialBT.println("S          - Save settings");
+    SerialBT.println("X          - Exit BT mode");
+  }
+  else {
+    SerialBT.println("Unknown command. Send ? for help.");
+  }
+}
+
+void enterBluetoothMode() {
+  if (!bluetoothMode) {
+    bluetoothMode = true;
+    
+    // Start Bluetooth
+    SerialBT.begin("STE_LED_Control");
+    
+    // Set start time for timeout
+    bluetoothStartTime = millis();
+    lastBluetoothActivity = millis();
+    
+    // Initially not connected
+    bluetoothConnected = false;
+    
+    // Visual indication
+    digitalWrite(BUTTON_LED_PIN, HIGH);
+    
+    Serial.println("Entering Bluetooth mode");
+  }
+}
+
+void exitBluetoothMode() {
+  if (bluetoothMode) {
+    bluetoothMode = false;
+    
+    // End Bluetooth
+    SerialBT.end();
+    
+    // Turn off button LED
+    digitalWrite(BUTTON_LED_PIN, LOW);
+    
+    // Save any pending settings
+    if (eepromNeedsSaving) {
+      saveSettingsToEEPROM();
+      eepromNeedsSaving = false;
+    }
+    
+    Serial.println("Exited Bluetooth mode");
+  }
+}
+
+void resetDevice() {
+  Serial.println("RESETTING DEVICE");
+  
+  // Visual indication - flash all LEDs red 3 times
+  for (int i = 0; i < 3; i++) {
+    // All red
+    fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Red);
+    fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Red);
+    FastLED.show();
+    delay(200);
+    
+    // All off
+    clearAllLeds();
+    FastLED.show();
+    delay(200);
+  }
+  
+  // Reset to default values
+  currentMode = 0;
+  bluetoothMode = false;
+  letterColor = CRGB::Yellow;
+  circleColor = CRGB::Yellow;
+  brightness = 125;
+  lettersEnabled = true;
+  circleEnabled = true;
+  circleEffect = 0;
+  
+  // Save defaults to EEPROM
+  saveSettingsToEEPROM();
+  
+  // Restart the device (ESP32 specific)
+  ESP.restart();
 }
 
 void checkButton() {
-  // Read the button state
+  // Read the state of the button
   int reading = digitalRead(BUTTON_PIN);
   
-  // If the button state changed, reset the debounce timer
+  // Check if input has changed
   if (reading != lastButtonState) {
     lastDebounceTime = millis();
   }
   
-  // If the reading has been stable for the debounce period
-  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+  // If the input is stable
+  if ((millis() - lastDebounceTime) > debounceDelay) {
     // If the button state has changed
     if (reading != buttonState) {
       buttonState = reading;
       
-      // If the button is pressed (LOW with pull-up resistor)
+      // Button has been pressed
       if (buttonState == LOW) {
-        // Change to the next mode
-        currentMode = (currentMode + 1) % NUM_MODES;
-        Serial.print("Mode changed to: ");
-        Serial.println(currentMode);
+        buttonPressStartTime = millis();
+        buttonLongPressed = false;
+        buttonVeryLongPressed = false;
+      }
+      // Button has been released
+      else if (buttonState == HIGH) {
+        unsigned long pressDuration = millis() - buttonPressStartTime;
         
-        // Flash the button LED to indicate the new mode
-        indicateModeWithButtonLED();
+        // Check for very long press (reset)
+        if (pressDuration >= RESET_LONG_PRESS_DURATION) {
+          // Reset already handled during press
+        }
+        // Check for long press (Bluetooth toggle)
+        else if (pressDuration >= BT_LONG_PRESS_DURATION) {
+          if (!bluetoothMode) {
+            enterBluetoothMode();
+          } else {
+            exitBluetoothMode();
+          }
+        }
+        // Short press (mode change) - only if not in Bluetooth mode
+        else if (!bluetoothMode) {
+          // Change to next mode
+          currentMode = (currentMode + 1) % NUM_MODES;
+          Serial.print("Changed to mode: ");
+          Serial.println(currentMode);
+          
+          // Mark for saving to EEPROM
+          eepromNeedsSaving = true;
+          
+          // Blink button LED to acknowledge
+          blinkButtonLED();
+        }
       }
     }
   }
   
-  // Save the current reading as the last button state
+  // If button is currently pressed, check for long press thresholds
+  if (buttonState == LOW) {
+    unsigned long pressDuration = millis() - buttonPressStartTime;
+    
+    // Check for very long press (reset)
+    if (pressDuration >= RESET_LONG_PRESS_DURATION && !buttonVeryLongPressed) {
+      buttonVeryLongPressed = true;
+      resetDevice();
+    }
+    // Check for long press (Bluetooth mode)
+    else if (pressDuration >= BT_LONG_PRESS_DURATION && !buttonLongPressed) {
+      buttonLongPressed = true;
+      // Visual feedback that long press was detected
+      digitalWrite(BUTTON_LED_PIN, HIGH);
+      delay(100);
+      digitalWrite(BUTTON_LED_PIN, LOW);
+    }
+  }
+  
+  // Save the reading for the next loop
   lastButtonState = reading;
 }
 
-void indicateModeWithButtonLED() {
-  // Flash the button LED based on the current mode (1-5 flashes)
-  for (int i = 0; i <= currentMode; i++) {
-    // Turn LED on
-    digitalWrite(BUTTON_LED_PIN, HIGH);
-    delay(200);
-    
-    // Turn LED off
-    digitalWrite(BUTTON_LED_PIN, LOW);
-    delay(200);
-  }
+void blinkButtonLED() {
+  digitalWrite(BUTTON_LED_PIN, HIGH);
+  delay(100);
+  digitalWrite(BUTTON_LED_PIN, LOW);
 }
 
-void runCurrentMode() {
-  switch (currentMode) {
-    case 0:
-      // Rainbow - inverse patterns on each strip
-      rainbowCycle(20);
-      break;
-    case 1:
-      // Complementary colors on each strip
-      dualColorMode(50);
-      break;
-    case 2:
-      // Chase patterns in opposite directions
-      dualChaseMode(50);
-      break;
-    case 3:
-      // Sparkle effect on both strips
-      dualSparkleMode(100, 20);
-      break;
-    case 4:
-      // Alternating patterns
-      alternatingPulseMode(20);
-      break;
-  }
-}
-
-// Rainbow effect with inverse patterns
-void rainbowCycle(int speedDelay) {
-  static uint8_t hue1 = 0;
-  static uint8_t hue2 = 128; // Offset for second strip
-  
-  // First strip - normal rainbow
-  fill_rainbow(leds1, NUM_LEDS1, hue1, 255 / NUM_LEDS1);
-  
-  // Second strip - reversed rainbow
-  fill_rainbow(leds2, NUM_LEDS2, hue2, -255 / NUM_LEDS2);
-  
-  FastLED.show();
-  
-  // Increment hues in opposite directions
-  hue1++;
-  hue2--;
-  
-  delay(speedDelay);
-}
-
-// Complementary colors on each strip
-void dualColorMode(int speedDelay) {
-  static int currentLed1 = 0;
-  static int currentLed2 = 0;
-  static unsigned long lastUpdate = 0;
-  
-  if (millis() - lastUpdate > speedDelay) {
-    // Strip 1 - Red to Green to Blue cycle
-    leds1[currentLed1] = CHSV(map(currentLed1, 0, NUM_LEDS1, 0, 255), 255, 255);
-    
-    // Strip 2 - Complementary colors (offset by 128 in hue)
-    leds2[currentLed2] = CHSV(map(currentLed2, 0, NUM_LEDS2, 128, 128+255), 255, 255);
-    
-    FastLED.show();
-    
-    // Update LED positions
-    currentLed1 = (currentLed1 + 1) % NUM_LEDS1;
-    currentLed2 = (currentLed2 + 1) % NUM_LEDS2;
-    
-    // Clear LEDs when starting over
-    if (currentLed1 == 0) fill_solid(leds1, NUM_LEDS1, CRGB::Black);
-    if (currentLed2 == 0) fill_solid(leds2, NUM_LEDS2, CRGB::Black);
-    
-    lastUpdate = millis();
-  }
-}
-
-// Chase patterns in opposite directions
-void dualChaseMode(int speedDelay) {
-  static int phase1 = 0;
-  static int phase2 = 0;
-  static unsigned long lastUpdate = 0;
-  
-  if (millis() - lastUpdate > speedDelay) {
-    // Clear all LEDs
-    fill_solid(leds1, NUM_LEDS1, CRGB::Black);
-    fill_solid(leds2, NUM_LEDS2, CRGB::Black);
-    
-    // Strip 1 - Blue chase, normal direction
-    for (int i = 0; i < NUM_LEDS1; i += 3) {
-      leds1[i + phase1] = CRGB::Blue;
-    }
-    
-    // Strip 2 - Red chase, reverse direction
-    for (int i = 0; i < NUM_LEDS2; i += 3) {
-      leds2[i + phase2] = CRGB::Red;
-    }
-    
-    FastLED.show();
-    
-    // Update phases in opposite directions
-    phase1 = (phase1 + 1) % 3;
-    phase2 = (phase2 - 1 + 3) % 3; // Ensure it stays positive
-    
-    lastUpdate = millis();
-  }
-}
-
-// Sparkle effect on both strips with different colors
-void dualSparkleMode(int density, int speedDelay) {
-  // Fade existing LEDs
-  fadeToBlackBy(leds1, NUM_LEDS1, 10);
-  fadeToBlackBy(leds2, NUM_LEDS2, 10);
-  
-  // Add random sparkles with different colors
-  for (int i = 0; i < density; i++) {
-    // First strip - white sparkles
-    int pos1 = random16(NUM_LEDS1);
-    leds1[pos1] += CRGB::White;
-    
-    // Second strip - cyan sparkles
-    int pos2 = random16(NUM_LEDS2);
-    leds2[pos2] += CRGB::Cyan;
-  }
-  
-  FastLED.show();
-  delay(speedDelay);
-}
-
-// Alternating pulse patterns
-void alternatingPulseMode(int speedDelay) {
-  static uint8_t hue = 0;
-  static bool pulseFirst = true;
-  static int brightness = 0;
-  static int fadeAmount = 5;
-  static unsigned long lastUpdate = 0;
-  
-  if (millis() - lastUpdate > speedDelay) {
-    // Set colors based on current hue
-    CRGB color1 = CHSV(hue, 255, 255);
-    CRGB color2 = CHSV(hue + 128, 255, 255); // Complementary color
-    
-    if (pulseFirst) {
-      // Pulse first strip, dim second strip
-      fill_solid(leds1, NUM_LEDS1, color1);
-      fill_solid(leds2, NUM_LEDS2, color2.fadeToBlackBy(200));
-    } else {
-      // Pulse second strip, dim first strip
-      fill_solid(leds1, NUM_LEDS1, color1.fadeToBlackBy(200));
-      fill_solid(leds2, NUM_LEDS2, color2);
-    }
-    
-    // Adjust brightness for pulsing effect
-    brightness += fadeAmount;
-    if (brightness <= 0 || brightness >= 255) {
-      fadeAmount = -fadeAmount;
-      
-      // When we hit minimum brightness, toggle which strip pulses
-      // and update the hue
-      if (brightness <= 0) {
-        pulseFirst = !pulseFirst;
-        hue += 32; // Change color
-      }
-    }
-    
-    // Apply the brightness to both strips
-    for (int i = 0; i < NUM_LEDS1; i++) {
-      leds1[i].nscale8(pulseFirst ? brightness : 255 - brightness);
-    }
-    for (int i = 0; i < NUM_LEDS2; i++) {
-      leds2[i].nscale8(pulseFirst ? 255 - brightness : brightness);
-    }
-    
-    FastLED.show();
-    lastUpdate = millis();
-  }
-}
-
-// Function to handle triads of LEDs for strip 1 (if needed)
-void setChipColor(int chipIndex, CRGB color) {
-  // Calculate the starting index of the first LED in this chip
-  int startIndex = chipIndex * LEDS_PER_CHIP;
-  
-  // Set all LEDs in this chip to the same color
-  for (int i = 0; i < LEDS_PER_CHIP; i++) {
-    leds1[startIndex + i] = color;
-  }
+void clearAllLeds() {
+  fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Black);
+  fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Black);
 }
