@@ -112,7 +112,7 @@ If you need to restore the default settings:
 
 ## Technical Specifications
 
-- **Input Voltage**: 12V DC via USB
+- **Input Voltage**: 12V DC via power adapter with 5.2mm barrel jack 
 - **Current Draw**: Up to 12W at maximum brightness (capped to 125) with all LEDs on
 - **Bluetooth**: Bluetooth Classic
 - **Microcontroller**: ESP32-WROOM-32
