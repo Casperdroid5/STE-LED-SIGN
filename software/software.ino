@@ -104,16 +104,15 @@ void setup() {
   // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
 
-  // Initialize LED strips - TEST DIFFERENT CHIPSET FOR CIRCLE
+  // Init ledstrips
   FastLED.addLeds<WS2812B, LED_PIN_LETTERS, GRB>(lettersLeds, NUM_LEDS_LETTERS);
 
-   FastLED.addLeds<WS2811, LED_PIN_CIRCLE, BRG>(circleLeds, NUM_LEDS_CIRCLE);
-);
+  FastLED.addLeds<WS2811, LED_PIN_CIRCLE, BRG>(circleLeds, NUM_LEDS_CIRCLE);
 
   // Initialize the button pin as input with pullup
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-  // Initialize button LED pin as output
+  // Initialize butin ton LED pin as output
   pinMode(BUTTON_LED_PIN, OUTPUT);
   digitalWrite(BUTTON_LED_PIN, LOW);
 
@@ -408,6 +407,9 @@ void letterPulseMode() {
 }
 
 void handleBluetoothMode() {
+  // Process any Bluetooth commands first
+  processBluetooth();
+  
   // Check for Bluetooth timeout if not connected
   if (!bluetoothConnected) {
     if (millis() - bluetoothStartTime > BLUETOOTH_TIMEOUT) {
@@ -415,41 +417,82 @@ void handleBluetoothMode() {
       exitBluetoothMode();
       return;
     }
-
+    
     // Blink blue on the circle while waiting for connection
-    if ((millis() / 500) % 2 == 0) {
-      fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Blue);
-    } else {
-      fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Black);
-    }
-
-    // Keep letters on with current letter color
-    if (lettersEnabled) {
-      fill_solid(lettersLeds, NUM_LEDS_LETTERS, letterColor);
-    } else {
-      fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Black);
+    static unsigned long lastBlink = 0;
+    static bool blinkState = false;
+    
+    if (millis() - lastBlink > 500) {
+      lastBlink = millis();
+      blinkState = !blinkState;
+      
+      if (blinkState) {
+        fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Blue);
+      } else {
+        fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Black);
+      }
+      
+      // Force an immediate update of the LEDs
+      FastLED.show();
     }
   } else {
-    // Connected - solid blue ring
-    fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Blue);
-
+    // When connected but not processing a command, we should maintain the correct display
+    // based on user settings
+    
     // Keep letters with current color
     if (lettersEnabled) {
       fill_solid(lettersLeds, NUM_LEDS_LETTERS, letterColor);
     } else {
       fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Black);
     }
+    
+    // IMPORTANT: Maintain circle LEDs according to current settings
+    // instead of forcing blue when connected
+    if (circleEnabled) {
+      switch (circleEffect) {
+        case 0: // Solid color
+          fill_solid(circleLeds, NUM_LEDS_CIRCLE, circleColor);
+          break;
+        case 1: // Rainbow effect
+          fill_rainbow(circleLeds, NUM_LEDS_CIRCLE, hue, 255 / NUM_LEDS_CIRCLE);
+          break;
+        case 2: // Slow hue shift
+          fill_solid(circleLeds, NUM_LEDS_CIRCLE, CHSV(hue, 255, 255));
+          break;
+      }
+    } else {
+      fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Black);
+    }
+    
+    // Force an update of the LEDs
+    FastLED.show();
   }
-
+  
   // Keep button LED on in Bluetooth mode
   digitalWrite(BUTTON_LED_PIN, HIGH);
-
-  // Process any Bluetooth commands
-  processBluetooth();
-
-  // Update LEDs
-  FastLED.show();
-
+  
+  // Update animations for effects that change over time
+  // This is essential for rainbow and hue shift effects
+  unsigned long currentTime = millis();
+  if (currentTime - lastUpdateTime >= updateInterval) {
+    lastUpdateTime = currentTime;
+    
+    // Update hue for rainbow effects
+    hue++;
+    
+    // Only update the display for animation effects that change over time
+    if (circleEnabled && (circleEffect == 1 || circleEffect == 2)) {
+      if (circleEffect == 1) { // Rainbow
+        fill_rainbow(circleLeds, NUM_LEDS_CIRCLE, hue, 255 / NUM_LEDS_CIRCLE);
+      } else if (circleEffect == 2) { // Hue shift
+        fill_solid(circleLeds, NUM_LEDS_CIRCLE, CHSV(hue, 255, 255));
+      }
+      
+      // Update LEDs
+      FastLED.show();
+    }
+  }
+  
   // Check if we need to save settings to EEPROM
   if (eepromNeedsSaving && (millis() - lastEepromWrite > WRITE_INTERVAL)) {
     saveSettingsToEEPROM();
@@ -490,9 +533,9 @@ void processBluetooth() {
 void processBtCommand(char* command) {
   Serial.print("BT Command: ");
   Serial.println(command);
-
+  
   bool updateDisplay = false;  // Flag to indicate if we need to refresh the display
-
+  
   // Command format:
   // L,R,G,B    - Set letter color (0-255 for each)
   // C,R,G,B    - Set circle color (0-255 for each)
@@ -503,7 +546,7 @@ void processBtCommand(char* command) {
   // S          - Save settings
   // X          - Exit BT mode
   // ?          - Help
-
+  
   // Process command based on first character
   if (command[0] == 'L' && command[1] == ',') {
     // Letter color command
@@ -512,76 +555,133 @@ void processBtCommand(char* command) {
     r = constrain(r, 0, 255);
     g = constrain(g, 0, 255);
     b = constrain(b, 0, 255);
-
+    
     letterColor = CRGB(r, g, b);
     eepromNeedsSaving = true;
-    updateDisplay = true;
-
+    
+    // Apply to letters immediately if enabled
+    if (lettersEnabled) {
+      fill_solid(lettersLeds, NUM_LEDS_LETTERS, letterColor);
+      updateDisplay = true;
+    }
+    
     SerialBT.printf("Letter color set to R:%d G:%d B:%d\n", r, g, b);
-  } else if (command[0] == 'C' && command[1] == ',') {
+  }
+  else if (command[0] == 'C' && command[1] == ',') {
     // Circle color command
     int r = 0, g = 0, b = 0;
     sscanf(command + 2, "%d,%d,%d", &r, &g, &b);
     r = constrain(r, 0, 255);
     g = constrain(g, 0, 255);
     b = constrain(b, 0, 255);
-
+    
     // Store the circle color
     circleColor = CRGB(r, g, b);
     eepromNeedsSaving = true;
-    updateDisplay = true;
-
+    
+    // Apply to circle immediately if enabled and in solid color mode
+    if (circleEnabled && circleEffect == 0) {
+      fill_solid(circleLeds, NUM_LEDS_CIRCLE, circleColor);
+      updateDisplay = true;
+    }
+    
     // Debug output with actual values
     Serial.printf("Debug - Circle color set to R:%d G:%d B:%d\n", circleColor.r, circleColor.g, circleColor.b);
     SerialBT.printf("Circle color set to R:%d G:%d B:%d\n", r, g, b);
-  } else if (command[0] == 'B' && command[1] == ',') {
+  }
+  else if (command[0] == 'B' && command[1] == ',') {
     // Brightness command
     int b = atoi(command + 2);
     b = constrain(b, 0, 125);  // Max 125 as requested
-
+    
     brightness = b;
     FastLED.setBrightness(brightness);
     eepromNeedsSaving = true;
     updateDisplay = true;
-
+    
     SerialBT.printf("Brightness set to %d\n", b);
-  } else if (command[0] == 'L' && command[1] == 'E' && command[2] == ',') {
+  }
+  else if (command[0] == 'L' && command[1] == 'E' && command[2] == ',') {
     // Letter enable/disable
     int enable = atoi(command + 3);
     lettersEnabled = (enable != 0);
     eepromNeedsSaving = true;
+    
+    // Update letters immediately
+    if (lettersEnabled) {
+      fill_solid(lettersLeds, NUM_LEDS_LETTERS, letterColor);
+    } else {
+      fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Black);
+    }
     updateDisplay = true;
-
+    
     SerialBT.printf("Letters %s\n", lettersEnabled ? "enabled" : "disabled");
-  } else if (command[0] == 'C' && command[1] == 'E' && command[2] == ',') {
+  }
+  else if (command[0] == 'C' && command[1] == 'E' && command[2] == ',') {
     // Circle enable/disable
     int enable = atoi(command + 3);
     circleEnabled = (enable != 0);
     eepromNeedsSaving = true;
+    
+    // Update circle immediately
+    if (circleEnabled) {
+      switch (circleEffect) {
+        case 0: // Solid color
+          fill_solid(circleLeds, NUM_LEDS_CIRCLE, circleColor);
+          break;
+        case 1: // Rainbow effect
+          fill_rainbow(circleLeds, NUM_LEDS_CIRCLE, hue, 255 / NUM_LEDS_CIRCLE);
+          break;
+        case 2: // Slow hue shift
+          fill_solid(circleLeds, NUM_LEDS_CIRCLE, CHSV(hue, 255, 255));
+          break;
+      }
+    } else {
+      fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Black);
+    }
     updateDisplay = true;
-
+    
     SerialBT.printf("Circle %s\n", circleEnabled ? "enabled" : "disabled");
-  } else if (command[0] == 'C' && command[1] == 'F' && command[2] == ',') {
+  }
+  else if (command[0] == 'C' && command[1] == 'F' && command[2] == ',') {
     // Circle effect
     int effect = atoi(command + 3);
     effect = constrain(effect, 0, 2);
     circleEffect = effect;
     eepromNeedsSaving = true;
-    updateDisplay = true;
-
-    const char* effectNames[] = { "Solid", "Rainbow", "Hue Shift" };
+    
+    // Update circle effect immediately
+    if (circleEnabled) {
+      switch (circleEffect) {
+        case 0: // Solid color
+          fill_solid(circleLeds, NUM_LEDS_CIRCLE, circleColor);
+          break;
+        case 1: // Rainbow effect
+          fill_rainbow(circleLeds, NUM_LEDS_CIRCLE, hue, 255 / NUM_LEDS_CIRCLE);
+          break;
+        case 2: // Slow hue shift
+          fill_solid(circleLeds, NUM_LEDS_CIRCLE, CHSV(hue, 255, 255));
+          break;
+      }
+      updateDisplay = true;
+    }
+    
+    const char* effectNames[] = {"Solid", "Rainbow", "Hue Shift"};
     SerialBT.printf("Circle effect set to: %s\n", effectNames[effect]);
-  } else if (command[0] == 'S') {
+  }
+  else if (command[0] == 'S') {
     // Save settings
     saveSettingsToEEPROM();
     eepromNeedsSaving = false;
-
+    
     SerialBT.println("Settings saved to EEPROM");
-  } else if (command[0] == 'X') {
+  }
+  else if (command[0] == 'X') {
     // Exit BT mode
     SerialBT.println("Exiting Bluetooth mode");
     exitBluetoothMode();
-  } else if (command[0] == '?') {
+  }
+  else if (command[0] == '?') {
     // Help
     SerialBT.println("Commands:");
     SerialBT.println("L,R,G,B    - Set letter color (0-255 for each)");
@@ -592,40 +692,17 @@ void processBtCommand(char* command) {
     SerialBT.println("CF,0/1/2   - Circle effect (0=solid, 1=rainbow, 2=hue)");
     SerialBT.println("S          - Save settings");
     SerialBT.println("X          - Exit BT mode");
-  } else {
+  }
+  else {
     SerialBT.println("Unknown command. Send ? for help.");
   }
-
-  // If a display update is needed, update the LED states and show immediately
+  
+  // If a display update is needed, show immediately
   if (updateDisplay) {
-    // Update circle based on current settings
-    if (circleEnabled) {
-      switch (circleEffect) {
-        case 0:  // Solid color
-          fill_solid(circleLeds, NUM_LEDS_CIRCLE, circleColor);
-          break;
-        case 1:  // Rainbow effect
-          fill_rainbow(circleLeds, NUM_LEDS_CIRCLE, hue, 255 / NUM_LEDS_CIRCLE);
-          break;
-        case 2:  // Slow hue shift
-          fill_solid(circleLeds, NUM_LEDS_CIRCLE, CHSV(hue, 255, 255));
-          break;
-      }
-    } else {
-      fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Black);
-    }
-
-    // Update letters based on current settings
-    if (lettersEnabled) {
-      fill_solid(lettersLeds, NUM_LEDS_LETTERS, letterColor);
-    } else {
-      fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Black);
-    }
-
-    // Show the changes immediately
     FastLED.show();
   }
 }
+
 void enterBluetoothMode() {
   if (!bluetoothMode) {
     bluetoothMode = true;
@@ -650,19 +727,45 @@ void enterBluetoothMode() {
 void exitBluetoothMode() {
   if (bluetoothMode) {
     bluetoothMode = false;
-
+    
     // End Bluetooth
     SerialBT.end();
-
+    
     // Turn off button LED
     digitalWrite(BUTTON_LED_PIN, LOW);
-
+    
     // Save any pending settings
     if (eepromNeedsSaving) {
       saveSettingsToEEPROM();
       eepromNeedsSaving = false;
     }
-
+    
+    // Most important: apply current settings to LEDs before returning to normal mode
+    if (lettersEnabled) {
+      fill_solid(lettersLeds, NUM_LEDS_LETTERS, letterColor);
+    } else {
+      fill_solid(lettersLeds, NUM_LEDS_LETTERS, CRGB::Black);
+    }
+    
+    if (circleEnabled) {
+      switch (circleEffect) {
+        case 0: // Solid color
+          fill_solid(circleLeds, NUM_LEDS_CIRCLE, circleColor);
+          break;
+        case 1: // Rainbow effect
+          fill_rainbow(circleLeds, NUM_LEDS_CIRCLE, hue, 255 / NUM_LEDS_CIRCLE);
+          break;
+        case 2: // Slow hue shift
+          fill_solid(circleLeds, NUM_LEDS_CIRCLE, CHSV(hue, 255, 255));
+          break;
+      }
+    } else {
+      fill_solid(circleLeds, NUM_LEDS_CIRCLE, CRGB::Black);
+    }
+    
+    // Force update before exiting
+    FastLED.show();
+    
     Serial.println("Exited Bluetooth mode");
   }
 }
