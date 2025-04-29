@@ -54,7 +54,7 @@ Voor iOS in Appstore: Bluetooth Terminal (niet getest)
 1. Houd de knop 3 seconden ingedrukt tot de knop-LED oplicht
 2. De cirkel knippert blauw tijdens het wachten op een verbinding
 3. Maak verbinding met "STE_LED_Control" vanaf uw Bluetooth-apparaat
-4. De cirkel blijft continu blauw zodra verbinding is gemaakt
+4. De cirkel blijft continu blauw zodra verbinding is gemaakt (en het eerste commando bijvoorbeeld "?", is verstuurd)
 
 ### Bluetooth-commando's
 
@@ -181,7 +181,7 @@ For IOS in Appstore: Bluetooth Terminal (not tested)
 1. Hold the button for 3 seconds until the button LED lights up
 2. The circle will blink blue while waiting for a connection
 3. Connect to "STE_LED_Control" from your Bluetooth device
-4. The circle will stay solid blue once connected
+4. The circle will stay solid blue once connected (and after the first command for example: "?" has been send.
 
 ### Bluetooth Commands
 
